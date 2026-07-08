@@ -1,0 +1,335 @@
+#!/usr/bin/env bash
+# mad — Multi-Agent Debate engine (Claude Opus ⇄ Codex GPT)
+#
+# The value of MAD comes from MODEL DIVERSITY: Claude and Codex fail
+# differently. Where the two DISAGREE is exactly where the real trade-off/risk
+# lives.
+#
+# Protocol (adaptive):
+#   Round 0    — BLIND proposals (each model answers without seeing the other)
+#   Round 1..N — adversarial critique + revision (each attacks the other, revises)
+#                stops when they converge OR after N rounds (default 2)
+#   Synthesis  — a judge consolidates: convergence / divergences / recommendation / risks
+#
+# Usage:
+#   mad "Should I use event-sourcing or CRUD for the orders module?"
+#   mad -f question.md
+#   echo "..." | mad
+#   mad --rounds 1 "..."        # shallow debate (single critique round)
+#   MAD_DRY_RUN=1 mad "test"    # mock run, spends no tokens (exercises the flow)
+#
+# Env overrides:
+#   MAD_LANG           prompt language: en (default) | pt
+#   MAD_OWNER          how the judge addresses whoever decides (default: decision-maker)
+#   MAD_CLAUDE_MODEL   model for the Claude side (default: session config)
+#   MAD_CODEX_MODEL    model for the Codex side  (default: codex config)
+#   MAD_CLAUDE_BIN     Claude CLI binary (default: claude)
+#   MAD_CODEX_BIN      Codex CLI binary  (default: codex)
+#   MAD_JUDGE          claude|codex — who writes the synthesis (default: claude)
+#   MAD_DEBATE_DIR     base dir for transcripts
+#                      (default: ${XDG_DATA_HOME:-~/.local/share}/mad/debates)
+
+set -eo pipefail
+
+# ---------- config ----------
+ROUNDS=2
+QUESTION=""
+DRY="${MAD_DRY_RUN:-}"
+JUDGE="${MAD_JUDGE:-claude}"
+LANG_SEL="${MAD_LANG:-en}"
+CLAUDE_BIN="${MAD_CLAUDE_BIN:-claude}"
+CODEX_BIN="${MAD_CODEX_BIN:-codex}"
+# transcripts: XDG data dir by default
+OUT_BASE="${MAD_DEBATE_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/mad/debates}"
+CODEX_MODEL_ARG=()
+CLAUDE_MODEL_ARG=()
+[ -n "${MAD_CODEX_MODEL:-}" ]  && CODEX_MODEL_ARG=(-m "$MAD_CODEX_MODEL")
+[ -n "${MAD_CLAUDE_MODEL:-}" ] && CLAUDE_MODEL_ARG=(--model "$MAD_CLAUDE_MODEL")
+
+# normalize language selector -> en|pt
+case "$LANG_SEL" in pt|PT|pt_*|pt-*) LANG_SEL=pt ;; *) LANG_SEL=en ;; esac
+# L <english> <portuguese> — pick the string for the active language
+L(){ if [ "$LANG_SEL" = pt ]; then printf '%s' "$2"; else printf '%s' "$1"; fi; }
+# how the judge addresses whoever decides (language-aware default)
+OWNER="${MAD_OWNER:-$(L "decision-maker" "decisor")}"
+
+# ---------- args ----------
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --rounds) ROUNDS="$2"; shift 2 ;;
+    -f|--file) QUESTION="$(cat "$2")"; shift 2 ;;
+    --dry-run) DRY=1; shift ;;
+    -h|--help)
+      cat <<'EOF'
+mad — Multi-Agent Debate (Claude Opus ⇄ Codex GPT)
+
+Usage:
+  mad "Should I use event-sourcing or CRUD for the orders module?"
+  mad -f question.md              question from a file
+  echo "monolith or services?" | mad
+  mad --rounds 1 "..."            shallow debate (single critique round)
+  MAD_DRY_RUN=1 mad "test"        mock run — spends no tokens
+
+Env:
+  MAD_LANG=en|pt   MAD_OWNER   MAD_JUDGE=claude|codex
+  MAD_CLAUDE_MODEL MAD_CODEX_MODEL   MAD_CLAUDE_BIN MAD_CODEX_BIN
+  MAD_DEBATE_DIR
+EOF
+      exit 0 ;;
+    *) QUESTION="${QUESTION:+$QUESTION }$1"; shift ;;
+  esac
+done
+# question via stdin if not given by arg/-f
+if [ -z "$QUESTION" ] && [ ! -t 0 ]; then QUESTION="$(cat)"; fi
+if [ -z "$QUESTION" ]; then
+  echo "$(L "mad: no architecture question provided." "mad: nenhuma questão de arquitetura fornecida.")" >&2; exit 2
+fi
+
+# ---------- dependency checks ----------
+if [ -z "$DRY" ]; then
+  command -v "$CLAUDE_BIN" >/dev/null 2>&1 || {
+    echo "$(L "mad: '$CLAUDE_BIN' not found in PATH — install the Claude Code CLI or set MAD_CLAUDE_BIN." \
+              "mad: '$CLAUDE_BIN' não encontrado no PATH — instale o Claude Code CLI ou aponte MAD_CLAUDE_BIN.")" >&2; exit 127; }
+  command -v "$CODEX_BIN" >/dev/null 2>&1 || {
+    echo "$(L "mad: '$CODEX_BIN' not found in PATH — install the Codex CLI or set MAD_CODEX_BIN." \
+              "mad: '$CODEX_BIN' não encontrado no PATH — instale o Codex CLI ou aponte MAD_CODEX_BIN.")" >&2; exit 127; }
+fi
+
+# ---------- workspace ----------
+TS="$(date +%Y%m%d-%H%M%S)"
+SLUG="$(printf '%s' "$QUESTION" | tr '[:upper:]' '[:lower:]' | tr -cs 'a-z0-9' '-' | cut -c1-40 | sed 's/-$//')"
+DIR="$OUT_BASE/$TS-$SLUG"
+mkdir -p "$DIR"
+# defense-in-depth: transcripts hold private decisions. Auto-ignore the debates
+# dir wherever it lands (even if pointed inside a repo).
+[ -f "$OUT_BASE/.gitignore" ] || printf '*\n' > "$OUT_BASE/.gitignore" 2>/dev/null || true
+printf '%s\n' "$QUESTION" > "$DIR/00-question.md"
+
+# progress goes to STDERR; STDOUT = only the final synthesis (clean for an agent to capture)
+log(){ printf '\033[2m[mad]\033[0m %s\n' "$*" >&2; }
+
+# ---------- model calls ----------
+# call_claude <promptfile> <outfile>
+call_claude(){
+  local pf="$1" of="$2"
+  if [ -n "$DRY" ]; then printf 'STUB-CLAUDE: %s\n' "$(head -c 60 "$pf")" > "$of"; return; fi
+  "$CLAUDE_BIN" -p "${CLAUDE_MODEL_ARG[@]}" --output-format text "$(cat "$pf")" > "$of" 2>>"$DIR/claude.err" \
+    || { echo "(claude failed — see $DIR/claude.err)" > "$of"; }
+}
+# call_codex <promptfile> <outfile>
+call_codex(){
+  local pf="$1" of="$2"
+  if [ -n "$DRY" ]; then printf 'STUB-CODEX: %s\n' "$(head -c 60 "$pf")" > "$of"; return; fi
+  "$CODEX_BIN" exec -s read-only --skip-git-repo-check --ephemeral "${CODEX_MODEL_ARG[@]}" \
+    -o "$of" "$(cat "$pf")" >>"$DIR/codex.log" 2>&1 \
+    || { echo "(codex failed — see $DIR/codex.log)" > "$of"; }
+}
+
+# ---------- prompts ----------
+write_blind(){ # <outfile>
+  if [ "$LANG_SEL" = pt ]; then
+    cat > "$1" <<EOF
+Você é um arquiteto de software sênior. Questão de arquitetura:
+
+$QUESTION
+
+Dê sua recomendação técnica: a decisão que você tomaria, o PORQUÊ, os principais
+trade-offs, e os riscos. Seja específico e opinativo — NÃO faça hedge, escolha um
+lado. ~300-400 palavras.
+EOF
+  else
+    cat > "$1" <<EOF
+You are a senior software architect. Architecture question:
+
+$QUESTION
+
+Give your technical recommendation: the decision you would make, WHY, the main
+trade-offs, and the risks. Be specific and opinionated — do NOT hedge, pick a
+side. ~300-400 words.
+EOF
+  fi
+}
+write_critique(){ # <outfile> <own_answer_file> <other_answer_file>
+  if [ "$LANG_SEL" = pt ]; then
+    cat > "$1" <<EOF
+Questão de arquitetura:
+$QUESTION
+
+SUA resposta anterior:
+$(cat "$2")
+
+Resposta de OUTRO arquiteto sênior (um modelo de IA diferente do seu, com blind
+spots distintos):
+$(cat "$3")
+
+Tarefa:
+1) Critique ADVERSARIALMENTE a resposta do outro: onde ela está errada, frágil,
+   ou ignora um trade-off/risco? Seja direto e técnico.
+2) Revise SUA recomendação à luz da crítica. Mude de posição se ele te convenceu;
+   defenda com argumento se não. Termine com sua recomendação ATUAL e seu nível
+   de confiança (alta/média/baixa). ~300-400 palavras.
+EOF
+  else
+    cat > "$1" <<EOF
+Architecture question:
+$QUESTION
+
+YOUR previous answer:
+$(cat "$2")
+
+Answer from ANOTHER senior architect (a different AI model than yours, with
+distinct blind spots):
+$(cat "$3")
+
+Task:
+1) ADVERSARIALLY critique the other answer: where is it wrong, fragile, or
+   ignoring a trade-off/risk? Be direct and technical.
+2) Revise YOUR recommendation in light of the critique. Change your position if
+   it convinced you; defend it with argument if not. End with your CURRENT
+   recommendation and your confidence level (high/medium/low). ~300-400 words.
+EOF
+  fi
+}
+write_converge(){ # <outfile> <A_file> <B_file>
+  if [ "$LANG_SEL" = pt ]; then
+    cat > "$1" <<EOF
+Duas recomendações de arquitetura para a MESMA questão:
+
+ARQUITETO A:
+$(cat "$2")
+
+ARQUITETO B:
+$(cat "$3")
+
+Eles convergiram na MESMA decisão central (ignore diferenças de fraseado/ênfase)?
+Responda com UMA palavra só: CONVERGED se a decisão central é a mesma, ou
+CONTINUE se ainda divergem em algo material.
+EOF
+  else
+    cat > "$1" <<EOF
+Two architecture recommendations for the SAME question:
+
+ARCHITECT A:
+$(cat "$2")
+
+ARCHITECT B:
+$(cat "$3")
+
+Did they converge on the SAME core decision (ignore differences in
+phrasing/emphasis)? Answer with ONE word only: CONVERGED if the core decision is
+the same, or CONTINUE if they still differ on something material.
+EOF
+  fi
+}
+write_synth(){ # <outfile>
+  if [ "$LANG_SEL" = pt ]; then
+    cat > "$1" <<EOF
+Você é o juiz de um debate entre dois arquitetos seniores (modelos de IA
+diferentes, com blind spots ortogonais) sobre:
+
+$QUESTION
+
+Transcript completo do debate:
+$(cat "$DIR"/[0-9]*-round*.md)
+
+Produza a síntese final em markdown, decisiva e concisa:
+
+## Convergência (confiança alta)
+Pontos em que AMBOS concordaram.
+
+## Divergências (a decisão é do $OWNER)
+Cada ponto de discórdia: o argumento de cada lado e POR QUE importa.
+
+## Recomendação
+A decisão que você recomenda, considerando o debate inteiro.
+
+## Riscos e o que validar antes de fechar a decisão
+EOF
+  else
+    cat > "$1" <<EOF
+You are the judge of a debate between two senior architects (different AI
+models, with orthogonal blind spots) about:
+
+$QUESTION
+
+Full debate transcript:
+$(cat "$DIR"/[0-9]*-round*.md)
+
+Produce the final synthesis in markdown, decisive and concise:
+
+## Convergence (high confidence)
+Points where BOTH agreed.
+
+## Divergences (for the $OWNER to decide)
+Each point of disagreement: each side's argument and WHY it matters.
+
+## Recommendation
+The decision you recommend, considering the whole debate.
+
+## Risks and what to validate before committing
+EOF
+  fi
+}
+
+# ---------- debate ----------
+log "$(L "question:" "questão:") $(head -c 70 <<<"$QUESTION")…"
+log "$(L "transcript:" "transcript:") ${DIR/#$HOME/~}"
+
+# Round 0 — blind proposals (parallel)
+log "$(L "round 0 — blind proposals (Claude ∥ Codex)…" "round 0 — propostas cegas (Claude ∥ Codex)…")"
+write_blind "$DIR/.p_blind"
+call_claude "$DIR/.p_blind" "$DIR/01-round0-claude.md" &
+PID_C=$!
+call_codex  "$DIR/.p_blind" "$DIR/01-round0-codex.md" &
+PID_X=$!
+wait $PID_C $PID_X
+A_PREV="$DIR/01-round0-claude.md"
+B_PREV="$DIR/01-round0-codex.md"
+
+# Critique rounds
+r=1
+while [ "$r" -le "$ROUNDS" ]; do
+  log "$(L "round $r — adversarial critique + revision…" "round $r — crítica adversarial + revisão…")"
+  write_critique "$DIR/.p_crit_c" "$A_PREV" "$B_PREV"
+  write_critique "$DIR/.p_crit_x" "$B_PREV" "$A_PREV"
+  A_NEW="$DIR/0$((r+1))-round$r-claude.md"
+  B_NEW="$DIR/0$((r+1))-round$r-codex.md"
+  call_claude "$DIR/.p_crit_c" "$A_NEW" &
+  PID_C=$!
+  call_codex  "$DIR/.p_crit_x" "$B_NEW" &
+  PID_X=$!
+  wait $PID_C $PID_X
+  A_PREV="$A_NEW"; B_PREV="$B_NEW"
+
+  # convergence (adaptive)
+  if [ "$r" -lt "$ROUNDS" ]; then
+    write_converge "$DIR/.p_conv" "$A_PREV" "$B_PREV"
+    if [ -n "$DRY" ]; then VERDICT="CONTINUE"; else
+      VERDICT="$("$CLAUDE_BIN" -p "${CLAUDE_MODEL_ARG[@]}" --output-format text "$(cat "$DIR/.p_conv")" 2>/dev/null | tr -d '[:space:]' | tr '[:lower:]' '[:upper:]')"
+    fi
+    log "$(L "converged?" "convergiram?") → ${VERDICT:-?}"
+    case "$VERDICT" in *CONVERGED*) log "$(L "converged — ending rounds." "convergiram — encerrando rounds.")"; break ;; esac
+  fi
+  r=$((r+1))
+done
+
+# ---------- synthesis ----------
+log "$(L "synthesis (judge: $JUDGE)…" "síntese (juiz: $JUDGE)…")"
+write_synth "$DIR/.p_synth"
+FINAL="$DIR/99-synthesis.md"
+{
+  printf '# %s — %s\n\n' "$(L "MAD Synthesis" "Síntese MAD")" "$TS"
+  printf '> %s %s\n\n' "$(L "Question:" "Questão:")" "$QUESTION"
+  printf '> %s Claude (Opus) ⇄ Codex (GPT) · %s %s · transcript: `%s`\n\n---\n\n' \
+    "$(L "Debaters:" "Debatedores:")" "$(L "judge:" "juiz:")" "$JUDGE" "${DIR/#$HOME/~}"
+} > "$FINAL"
+if [ "$JUDGE" = "codex" ]; then
+  call_codex "$DIR/.p_synth" "$DIR/.synth_body"
+else
+  call_claude "$DIR/.p_synth" "$DIR/.synth_body"
+fi
+cat "$DIR/.synth_body" >> "$FINAL"
+rm -f "$DIR"/.p_* "$DIR/.synth_body"
+
+log "$(L "done →" "pronto →") ${FINAL/#$HOME/~}"
+cat "$FINAL"   # STDOUT = final synthesis

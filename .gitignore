@@ -1,0 +1,15 @@
+# Real debate transcripts NEVER go into the repo — they may hold private
+# decisions/data. The engine writes them to $MAD_DEBATE_DIR (outside the repo by
+# default), but we ignore any accidental capture inside the worktree.
+debates/
+.mad/
+*.debate.md
+*-synthesis.md
+*-sintese.md
+*-question.md
+*-round*.md
+
+# local outputs / scratch
+*.log
+*.err
+.DS_Store
