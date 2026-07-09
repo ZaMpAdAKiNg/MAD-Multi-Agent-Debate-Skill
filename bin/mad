@@ -82,17 +82,23 @@ done
 # question via stdin if not given by arg/-f
 if [ -z "$QUESTION" ] && [ ! -t 0 ]; then QUESTION="$(cat)"; fi
 if [ -z "$QUESTION" ]; then
-  echo "$(L "mad: no architecture question provided." "mad: nenhuma questão de arquitetura fornecida.")" >&2; exit 2
+  L "mad: no architecture question provided." "mad: nenhuma questão de arquitetura fornecida." >&2
+  printf '\n' >&2
+  exit 2
 fi
 
 # ---------- dependency checks ----------
 if [ -z "$DRY" ]; then
   command -v "$CLAUDE_BIN" >/dev/null 2>&1 || {
-    echo "$(L "mad: '$CLAUDE_BIN' not found in PATH — install the Claude Code CLI or set MAD_CLAUDE_BIN." \
-              "mad: '$CLAUDE_BIN' não encontrado no PATH — instale o Claude Code CLI ou aponte MAD_CLAUDE_BIN.")" >&2; exit 127; }
+    L "mad: '$CLAUDE_BIN' not found in PATH — install the Claude Code CLI or set MAD_CLAUDE_BIN." \
+      "mad: '$CLAUDE_BIN' não encontrado no PATH — instale o Claude Code CLI ou aponte MAD_CLAUDE_BIN." >&2
+    printf '\n' >&2
+    exit 127; }
   command -v "$CODEX_BIN" >/dev/null 2>&1 || {
-    echo "$(L "mad: '$CODEX_BIN' not found in PATH — install the Codex CLI or set MAD_CODEX_BIN." \
-              "mad: '$CODEX_BIN' não encontrado no PATH — instale o Codex CLI ou aponte MAD_CODEX_BIN.")" >&2; exit 127; }
+    L "mad: '$CODEX_BIN' not found in PATH — install the Codex CLI or set MAD_CODEX_BIN." \
+      "mad: '$CODEX_BIN' não encontrado no PATH — instale o Codex CLI ou aponte MAD_CODEX_BIN." >&2
+    printf '\n' >&2
+    exit 127; }
 fi
 
 # ---------- workspace ----------
@@ -320,7 +326,7 @@ FINAL="$DIR/99-synthesis.md"
 {
   printf '# %s — %s\n\n' "$(L "MAD Synthesis" "Síntese MAD")" "$TS"
   printf '> %s %s\n\n' "$(L "Question:" "Questão:")" "$QUESTION"
-  printf '> %s Claude (Opus) ⇄ Codex (GPT) · %s %s · transcript: `%s`\n\n---\n\n' \
+  printf "> %s Claude (Opus) ⇄ Codex (GPT) · %s %s · transcript: \`%s\`\n\n---\n\n" \
     "$(L "Debaters:" "Debatedores:")" "$(L "judge:" "juiz:")" "$JUDGE" "${DIR/#$HOME/~}"
 } > "$FINAL"
 if [ "$JUDGE" = "codex" ]; then

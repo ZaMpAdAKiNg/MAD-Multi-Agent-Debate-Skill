@@ -1,4 +1,6 @@
-# mad — Multi-Agent Debate
+# MAD — Multi-Agent Debate Skill
+
+**Language:** English | [Português (Brasil)](README.pt-BR.md)
 
 Make **Claude (Opus)** and **Codex (GPT)** debate the same architecture question in
 adversarial rounds — *blind proposals → adversarial critique → revision → synthesis* —
@@ -35,8 +37,8 @@ Windows via WSL2 or Git Bash.
 ## Install
 
 ```bash
-git clone https://github.com/ZaMpAdAKiNg/mad.git
-cd mad
+git clone https://github.com/ZaMpAdAKiNg/MAD-Multi-Agent-Debate-Skill.git
+cd MAD-Multi-Agent-Debate-Skill
 ./install.sh
 ```
 
@@ -50,7 +52,7 @@ auto-copies) the one line to wire up `SKILL.md` for your agent runtime.
 <summary><strong>macOS</strong></summary>
 
 ```bash
-git clone https://github.com/ZaMpAdAKiNg/mad.git && cd mad
+git clone https://github.com/ZaMpAdAKiNg/MAD-Multi-Agent-Debate-Skill.git && cd MAD-Multi-Agent-Debate-Skill
 ./install.sh
 ```
 
@@ -67,7 +69,7 @@ export PATH="$HOME/.local/bin:$PATH"
 
 ```bash
 sudo apt-get update && sudo apt-get install -y git      # if needed
-git clone https://github.com/ZaMpAdAKiNg/mad.git && cd mad
+git clone https://github.com/ZaMpAdAKiNg/MAD-Multi-Agent-Debate-Skill.git && cd MAD-Multi-Agent-Debate-Skill
 ./install.sh
 ```
 
@@ -93,14 +95,14 @@ wsl --install        # first time only, then reboot
 
 ```bash
 # inside the WSL2 shell
-git clone https://github.com/ZaMpAdAKiNg/mad.git && cd mad
+git clone https://github.com/ZaMpAdAKiNg/MAD-Multi-Agent-Debate-Skill.git && cd MAD-Multi-Agent-Debate-Skill
 ./install.sh
 ```
 
 **Git Bash (alternative).** In the Git Bash shell:
 
 ```bash
-git clone https://github.com/ZaMpAdAKiNg/mad.git && cd mad
+git clone https://github.com/ZaMpAdAKiNg/MAD-Multi-Agent-Debate-Skill.git && cd MAD-Multi-Agent-Debate-Skill
 MAD_BIN_DIR="$HOME/bin" ./install.sh
 ```
 
